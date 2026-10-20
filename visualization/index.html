@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Claude Code</title>
+<style>
+  :root { --fg: #222; --muted: #777; --bar: #d97757; --bar-bg: #f6e3dc; --tab: #eee; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #ddd; --muted: #999; --bar-bg: #4a2f26; --tab: #333; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 12px/1.3 system-ui, sans-serif; color: var(--fg); background: transparent; }
+  nav { display: flex; gap: 4px; margin-bottom: 6px; }
+  nav button { border: 0; padding: 2px 8px; border-radius: 3px; background: var(--tab); color: var(--fg); cursor: pointer; font: inherit; }
+  nav button[aria-pressed="true"] { background: var(--bar); color: #fff; }
+  .row { position: relative; padding: 3px 6px; margin-bottom: 3px; border-radius: 3px; background: var(--bar-bg); overflow: hidden; }
+  .row .fill { position: absolute; inset: 0 auto 0 0; background: var(--bar); opacity: .35; }
+  .row .label, .row .sub { position: relative; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .sub { color: var(--muted); font-size: 11px; }
+  .empty { color: var(--muted); }
+</style>
+</head>
+<body>
+<nav>
+  <button data-tab="ticket" aria-pressed="true">Tickets</button>
+  <button data-tab="project">Projects</button>
+  <button data-tab="session">Sessions</button>
+  <button data-tab="model">Models</button>
+</nav>
+<div id="list"><span class="empty">Loading…</span></div>
+<script>
+const params = new URLSearchParams(location.search);
+const host = params.get("hostname");
+const timeperiod = `${params.get("start")}/${params.get("end")}`;
+
+const query = [`RETURN = query_bucket(find_bucket("aw-watcher-claude-code_", "${host}"));`];
+
+const groups = {
+  ticket: d => [d.ticket ?? "no ticket", ""],
+  project: d => [d.project, ""],
+  session: d => [d.title ?? d.session_id.slice(0, 8), [d.ticket, d.project].filter(Boolean).join(" · ")],
+  model: d => [d.model ?? "unknown", d.effort ? `${d.effort} effort` : ""],
+};
+
+let events = [];
+let tab = "ticket";
+
+// merge_events_by_keys only sums duration, so cost is summed here too.
+function group(key) {
+  const rows = new Map();
+  for (const e of events) {
+    const [label, sub] = groups[key](e.data);
+    const id = label + "\0" + sub;
+    const row = rows.get(id) ?? { label, sub, duration: 0, cost: 0 };
+    row.duration += e.duration;
+    row.cost += e.data.cost_usd ?? 0;
+    rows.set(id, row);
+  }
+  return [...rows.values()].sort((a, b) => b.duration - a.duration);
+}
+
+const fmt = s => {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? `${h}h ${m}m` : m ? `${m}m ${Math.floor(s % 60)}s` : `${Math.floor(s)}s`;
+};
+
+function draw() {
+  const rows = group(tab);
+  const list = document.getElementById("list");
+  if (!rows.length) { list.innerHTML = '<span class="empty">No Claude Code activity</span>'; return; }
+  const max = rows[0].duration || 1;
+  list.replaceChildren(...rows.map(r => {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.title = `${r.label}\n${r.sub}`.trim();
+    row.innerHTML = `<div class="fill" style="width:${(r.duration / max) * 100}%"></div>
+      <div class="label"></div><div class="sub"></div>`;
+    row.querySelector(".label").textContent = r.label;
+    row.querySelector(".sub").textContent = [r.sub, fmt(r.duration), `≈$${r.cost.toFixed(2)}`].filter(Boolean).join(" · ");
+    return row;
+  }));
+}
+
+document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => {
+  tab = b.dataset.tab;
+  document.querySelectorAll("nav button").forEach(x => x.setAttribute("aria-pressed", x === b));
+  draw();
+}));
+
+fetch("/api/0/query/", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ timeperiods: [timeperiod], query }),
+})
+  .then(r => r.ok ? r.json() : Promise.reject(r.status))
+  .then(([result]) => { events = result; draw(); })
+  .catch(() => { document.getElementById("list").innerHTML = '<span class="empty">No Claude Code activity</span>'; });
+</script>
+</body>
+</html>
